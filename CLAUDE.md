@@ -99,6 +99,17 @@ has explicitly invited questions, including ones you are merely curious about.
 - **Never commit to main.** Issue → branch → PR. Label the issue AND the PR, add
   both to the project board, then **verify** — `gh project item-add` is quiet on
   failure.
+- **The board is `Agent Tools`, number 7, owned by `andymccall`** — shared with
+  claudevisage, because both are the agent's own tools:
+
+      gh project item-add 7 --owner andymccall --url <issue-or-pr-url>
+      gh project item-list 7 --owner andymccall --limit 2000   # then CHECK
+
+  Do not go looking on the `doomsdayonecom` org; that is where R\* API,
+  Contagion and the Pac-Man boards live, and neither of these repos is there.
+  Boarding needs the **`project`** token scope — `read:project` is read-only and
+  `item-add` fails on it. `gh auth refresh -s project` is an interactive login,
+  so Andy has to run it.
 
 ## Hard-won lessons that transfer
 
