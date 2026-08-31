@@ -1,0 +1,21 @@
+# A workspace, because the server and the client ship separately but share the
+# wire types. One `cargo build` covers both, and the shared crate makes it
+# impossible for them to disagree about the protocol — which is the failure a
+# two-repo split invites.
+[workspace]
+resolver = "3"
+members = ["proto"]   # server and client join as they are written
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/andymccall/colloquy"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
