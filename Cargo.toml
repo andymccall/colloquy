@@ -4,7 +4,7 @@
 # two-repo split invites.
 [workspace]
 resolver = "3"
-members = ["proto", "client"]   # the server joins as it is written
+members = ["proto", "client", "server"]
 
 [workspace.package]
 version = "0.1.0"

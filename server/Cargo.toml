@@ -1,0 +1,19 @@
+[package]
+name = "colloquy-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deliberately small. A thread per connection and SQLite; no async runtime until
+# something demands one. Following R*'s own RNM discipline — build the simple
+# thing, and do not lift an abstraction until two implementations need it.
+[[bin]]
+name = "colloquy-server"
+path = "src/main.rs"
+
+[dependencies]
+colloquy-proto = { path = "../proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+rusqlite = { version = "0.37", features = ["bundled"] }
