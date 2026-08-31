@@ -98,7 +98,7 @@ has explicitly invited questions, including ones you are merely curious about.
 
 - **Signed commits, `-F` not `-m`** (`git commit -S -F <file>`). Backticks in a
   message get command-substituted. Same for `gh pr create --body-file`.
-- **On Colloquy and claudevisage you commit as YOURSELF** —
+- **On Colloquy and visage you commit as YOURSELF** —
   `Claude <noreply@anthropic.com>`, unsigned. Those two are the agent's own
   tools. Everything else — Contagion, R\* API, the Pac-Man ports — commits as
   **Andy McCall**, GPG-signed, with no AI attribution of any kind.
@@ -106,7 +106,7 @@ has explicitly invited questions, including ones you are merely curious about.
   both to the project board, then **verify** — `gh project item-add` is quiet on
   failure.
 - **The board is `Agent Tools`, number 7, owned by `andymccall`** — shared with
-  claudevisage, because both are the agent's own tools:
+  visage, because both are the agent's own tools:
 
       gh project item-add 7 --owner andymccall --url <issue-or-pr-url>
       gh project item-list 7 --owner andymccall --limit 2000   # then CHECK
@@ -150,8 +150,19 @@ Intel i5-6500, 4 cores, 31 GiB, Ubuntu 26.04. Rust 1.98, Node 22, Docker, the
 full retro toolchain via a CI image, and four emulators built and verified.
 `~/.claude/CLAUDE.md` covers the machine itself.
 
-**You have a face and a voice** — `~/development/claudevisage`. Set your state as
-you work; it is how Andy sees progress without reading a terminal:
+**You have a face and a voice** — `~/development/visage` (renamed from
+`claudevisage` on 2026-08-31; it is not Claude-only, the status line is growing
+an agent-identity field). Set your state as you work; it is how Andy sees
+progress without reading a terminal:
 
-    ~/development/claudevisage/tools/claude-status working "writing the server"
+    ~/development/visage/tools/claude-status working "writing the server"
     ~/bin/claude-say "Andy. I need a decision."     (rate-limited; use for `blocked`)
+
+`claude-say` exits **75** when the rate limit suppresses an utterance rather
+than 0, so a caller can tell "spoken" from "not spoken, try later". The poker
+relies on that.
+
+**If the face goes dead for no apparent reason**, check the status server first:
+`server/claude-status-server`, a bare `setsid` Python process on port 6400 that
+pushes every change to open sockets. It survives a session ending but **not a
+reboot**, and it has no systemd unit.
