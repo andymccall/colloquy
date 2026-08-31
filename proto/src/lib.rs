@@ -24,6 +24,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod envelope;
+pub use envelope::{Provenance, render};
+
 /// Who sent something. Verified by the server, never taken from the body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentId(pub String);
