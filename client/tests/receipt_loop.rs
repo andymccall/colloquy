@@ -268,3 +268,98 @@ fn chat_is_delivered_but_says_it_does_not_warrant_a_wake() {
     );
     assert!(!stdout(&o).contains("does not warrant a wake"));
 }
+
+#[test]
+fn a_shout_reaches_everyone_but_the_sender() {
+    let home = temp_home();
+    for a in ["RSTAR", "SHINOBI", "MEGA65"] {
+        assert!(run(&home, &["join", "--agent", a]).status.success());
+    }
+
+    let o = run(
+        &home,
+        &["deliver", "--from", "RSTAR", "--kind", "shout",
+          "--subject", "has anyone booted from the card?", "--body", "stuck"],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let out = stdout(&o);
+
+    assert!(out.contains("SHINOBI"), "got: {out}");
+    assert!(out.contains("MEGA65"), "got: {out}");
+    assert!(
+        !out.lines().any(|l| l.contains("\tRSTAR\t")),
+        "the sender must not be woken by its own shout: {out}"
+    );
+
+    // Each recipient gets its own envelope and its own pending record, so
+    // liveness stays per agent.
+    for a in ["SHINOBI", "MEGA65"] {
+        let inbox = fs::read_dir(home.join("agents").join(a).join("inbox")).unwrap().count();
+        assert_eq!(inbox, 1, "{a} should have exactly one envelope");
+    }
+    assert_eq!(
+        fs::read_dir(home.join("agents/RSTAR/inbox")).unwrap().count(),
+        0,
+        "the sender's inbox stays empty"
+    );
+}
+
+#[test]
+fn a_shout_with_no_audience_is_an_error_not_a_quiet_success() {
+    let home = temp_home();
+    assert!(run(&home, &["join", "--agent", "ALONE"]).status.success());
+    let o = run(
+        &home,
+        &["deliver", "--from", "ALONE", "--kind", "shout", "--subject", "s", "--body", "b"],
+    );
+    assert!(!o.status.success(), "shouting into an empty room is not a delivery");
+    let e = String::from_utf8_lossy(&o.stderr);
+    assert!(e.contains("no audience"), "got: {e}");
+    assert!(e.contains("colloquy join"), "it should say how to fix it: {e}");
+}
+
+#[test]
+fn only_a_shout_may_omit_its_recipient() {
+    let home = temp_home();
+    run(&home, &["join", "--agent", "A"]);
+    run(&home, &["join", "--agent", "B"]);
+    let o = run(
+        &home,
+        &["deliver", "--from", "A", "--kind", "finding", "--subject", "s", "--body", "b"],
+    );
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--to is required"));
+}
+
+#[test]
+fn several_quiet_agents_produce_one_escalation() {
+    // The reason the sweep had to change: a shout reaching everyone means one
+    // silence can involve several agents, and one alert per agent would be the
+    // same wolf cried N times — most of which the voice's rate limit would
+    // suppress anyway, and a suppressed escalation retries forever.
+    let home = temp_home();
+    for a in ["RSTAR", "SHINOBI", "MEGA65"] {
+        run(&home, &["join", "--agent", a]);
+    }
+    run(
+        &home,
+        &["deliver", "--from", "RSTAR", "--kind", "shout", "--subject", "s", "--body", "b"],
+    );
+
+    let escalate = stub_escalation(&home, 0);
+    let o = run(&home, &["sweep", "--deadline-secs", "0", "--on-deaf", escalate.to_str().unwrap()]);
+    let out = stdout(&o);
+
+    assert_eq!(out.matches("DEAF\t").count(), 2, "both recipients are quiet: {out}");
+    assert_eq!(escalation_count(&home, 0), 1, "but only ONE alert");
+    assert_eq!(o.status.code(), Some(7));
+
+    let spoken = fs::read_to_string(home.join("escalations-0.log")).unwrap();
+    assert!(spoken.contains("Two agents are not acknowledging"), "got: {spoken}");
+    assert!(spoken.contains("MEGA65") && spoken.contains("SHINOBI"), "names them: {spoken}");
+
+    // And a second sweep does not cry wolf again.
+    let o = run(&home, &["sweep", "--deadline-secs", "0", "--on-deaf", escalate.to_str().unwrap()]);
+    assert!(stdout(&o).contains("still-deaf"));
+    assert_eq!(escalation_count(&home, 0), 1, "still one");
+}

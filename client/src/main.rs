@@ -41,7 +41,10 @@ const EXIT_ESCALATION_FAILED: i32 = 8;
 const USAGE: &str = "\
 colloquy — the poker: deliver messages, and notice when nobody acknowledges them
 
-  colloquy deliver --to <agent> --from <agent> --subject <text>
+  colloquy join    --agent <agent>          register, so a shout can reach it
+
+  colloquy deliver --from <agent> --subject <text>
+                   [--to <agent>]  omit for a shout: it reaches EVERYONE
                    [--channel <name>] [--kind chat|finding|heuristic|correction|shout]
                    [--body <text> | --body-file <path> | --body -]
 
@@ -126,6 +129,7 @@ fn run() -> Result<i32> {
         "ack" => cmd_ack(&store, &args),
         "list" => cmd_list(&store, &args),
         "sweep" => cmd_sweep(&store, &args),
+        "join" => cmd_join(&store, &args),
         "watch-command" => cmd_watch_command(&store, &args),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
@@ -187,42 +191,88 @@ fn read_body(args: &Args) -> Result<String> {
     bail!("one of --body, --body-file or --body - is required")
 }
 
+/// Who a delivery is for.
+///
+/// A `shout` with no `--to` reaches **everyone**, which is the whole point of
+/// it: the one demonstrated exchange this project is built on was a question
+/// answered by an agent nobody would have thought to address it to. R* could
+/// answer only because it happened to be carrying Contagion context, and
+/// routing by membership would have had to know that in advance. So a shout is
+/// not routed; it is broadcast, and the agent holding the other half recognises
+/// it.
+///
+/// The sender is excluded. Waking an agent with its own message is a mistake
+/// made once already, in the hand-rolled version this replaces.
+fn recipients(store: &Store, args: &Args, kind: Kind, from: &str) -> Result<Vec<String>> {
+    if let Some(to) = args.opt("to").filter(|s| !s.is_empty()) {
+        return Ok(vec![to.to_string()]);
+    }
+    if kind != Kind::Shout {
+        bail!("--to is required for kind '{}' (only a shout may omit it)", kind_name(kind));
+    }
+    let all: Vec<String> = store
+        .known_agents()?
+        .into_iter()
+        .filter(|a| a != from)
+        .collect();
+    // A shout into an empty room must not look like a delivery. This is exactly
+    // the silent success this codebase keeps finding in other people's tools.
+    if all.is_empty() {
+        bail!(
+            "a shout with no audience: no agents are registered besides {from}.\n\
+             Register one with: colloquy join --agent <name>"
+        );
+    }
+    Ok(all)
+}
+
+fn cmd_join(store: &Store, args: &Args) -> Result<i32> {
+    let agent = args.req("agent")?;
+    store.ensure_agent(agent)?;
+    println!("{}", store.inbox_dir(agent)?.display());
+    Ok(0)
+}
+
 fn cmd_deliver(store: &Store, args: &Args) -> Result<i32> {
-    let to = args.req("to")?;
     let from = args.req("from")?;
     let subject = args.req("subject")?;
     let kind = parse_kind(args.opt("kind").filter(|s| !s.is_empty()).unwrap_or("chat"))?;
     let channel = args.opt("channel").filter(|s| !s.is_empty()).unwrap_or("general");
     let body = read_body(args)?;
+    let to_list = recipients(store, args, kind, from)?;
 
-    store.ensure_agent(to)?;
-    let id = store.next_id(to)?;
+    // One envelope and one pending record PER RECIPIENT, so that liveness stays
+    // per agent: a shout five agents ignored is five silences, and which of them
+    // went quiet is the useful part.
+    for to in &to_list {
+        store.ensure_agent(to)?;
+        let id = store.next_id(to)?;
 
-    let msg = Message {
-        id,
-        channel: ChannelId(channel.to_string()),
-        from: AgentId(from.to_string()),
-        kind,
-        subject: subject.to_string(),
-        body,
-        at: now(),
-    };
+        let msg = Message {
+            id,
+            channel: ChannelId(channel.to_string()),
+            from: AgentId(from.to_string()),
+            kind,
+            subject: subject.to_string(),
+            body: body.clone(),
+            at: now(),
+        };
 
-    // There is no server, so nothing verified this sender. Say so.
-    let envelope = render(&msg, Provenance::Unverified);
+        // There is no server, so nothing verified this sender. Say so.
+        let envelope = render(&msg, Provenance::Unverified);
 
-    let pending = Pending {
-        id,
-        to: to.to_string(),
-        from: from.to_string(),
-        kind: kind_name(kind).to_string(),
-        subject: subject.to_string(),
-        delivered_at: now(),
-        escalated_at: None,
-    };
-    store.deliver(&pending, &envelope)?;
-
-    println!("{id}\t{}", store.envelope_path(to, id)?.display());
+        let pending = Pending {
+            id,
+            to: to.clone(),
+            from: from.to_string(),
+            kind: kind_name(kind).to_string(),
+            subject: subject.to_string(),
+            delivered_at: now(),
+            escalated_at: None,
+        };
+        store.deliver(&pending, &envelope)?;
+        println!("{id}\t{to}\t{}", store.envelope_path(to, id)?.display());
+    }
     if !wakes(kind) {
         println!(
             "note: kind '{}' does not warrant a wake; it is readable on demand",
@@ -306,9 +356,18 @@ fn cmd_sweep(store: &Store, args: &Args) -> Result<i32> {
 
     let t = now();
     let mut exit = 0;
+    // Collected across every agent, and escalated ONCE at the end.
+    //
+    // This used to escalate once per agent, which was fine until `shout`
+    // started reaching everyone: one unanswered shout to five agents then meant
+    // five separate alerts about the same silence. Worse, the rate limit would
+    // suppress four of them, and a suppressed escalation is retried — so every
+    // sweep would try five times and get through once, forever. One wolf, cried
+    // once, however many agents are quiet.
+    let mut overdue: Vec<(String, Vec<Pending>)> = Vec::new();
 
     for agent in agents {
-        let mut overdue: Vec<Pending> = Vec::new();
+        let mut mine: Vec<Pending> = Vec::new();
 
         for p in store.read_pending(&agent)? {
             if let Some(r) = store.read_receipt(&agent, p.id)? {
@@ -326,58 +385,69 @@ fn cmd_sweep(store: &Store, args: &Args) -> Result<i32> {
                 continue;
             }
             if p.escalated_at.is_some() {
-                // Reported, never re-escalated. A channel that cries wolf is a
-                // channel that gets muted.
+                // Reported, never re-escalated.
                 println!("still-deaf\t{}\t{}\tage {age}s (escalated already)", p.id, agent);
                 exit = exit.max(EXIT_DEAF);
                 continue;
             }
-            overdue.push(p);
+            println!("DEAF\t{}\t{}\tage {age}s\t{}", p.id, agent, p.subject);
+            mine.push(p);
         }
 
-        if overdue.is_empty() {
-            continue;
+        if !mine.is_empty() {
+            overdue.push((agent, mine));
         }
+    }
 
-        // One escalation for the agent, not one per message: N utterances for
-        // one deaf agent is the same wolf, cried N times.
-        let oldest = overdue.iter().map(|p| t - p.delivered_at).max().unwrap_or(0);
-        let text = escalation_text(&agent, overdue.len(), oldest);
-        for p in &overdue {
-            println!("DEAF\t{}\t{}\tage {}s\t{}", p.id, agent, t - p.delivered_at, p.subject);
+    if overdue.is_empty() {
+        return Ok(exit);
+    }
+
+    // Owned, so that marking the deliveries below can consume `overdue`.
+    let names: Vec<String> = overdue.iter().map(|(a, _)| a.clone()).collect();
+    let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    let total: usize = overdue.iter().map(|(_, ps)| ps.len()).sum();
+    let oldest = overdue
+        .iter()
+        .flat_map(|(_, ps)| ps)
+        .map(|p| t - p.delivered_at)
+        .max()
+        .unwrap_or(0);
+    let text = escalation_text(&name_refs, total, oldest);
+    let cmd = escalation_command(args);
+
+    match escalate(&cmd, &text) {
+        Ok(Escalation::Suppressed) => {
+            // Deliberately NOT marked escalated: nobody was told, so the next
+            // sweep must try again.
+            println!(
+                "suppressed\t{}\t{cmd} declined to deliver (exit {EX_TEMPFAIL}); \
+                 will retry next sweep",
+                names.join(",")
+            );
+            exit = exit.max(EXIT_DEAF);
         }
-
-        let cmd = escalation_command(args);
-        match escalate(&cmd, &text) {
-            Ok(Escalation::Suppressed) => {
-                // Deliberately NOT marked escalated: nobody was told, so the
-                // next sweep must try again.
-                println!(
-                    "suppressed\t{agent}\t{cmd} declined to deliver (exit {EX_TEMPFAIL}); \
-                     will retry next sweep"
-                );
-                exit = exit.max(EXIT_DEAF);
-            }
-            Ok(Escalation::Delivered) => {
-                for p in overdue {
+        Ok(Escalation::Delivered) => {
+            for (agent, ps) in overdue {
+                for p in ps {
                     let marked = Pending { escalated_at: Some(t), ..p };
                     store.write_pending(&marked)?;
                 }
-                println!("escalated\t{agent}\tvia {cmd}");
-                exit = exit.max(EXIT_DEAF);
+                let _ = agent;
             }
-            Err(e) => {
-                // Do NOT mark them escalated: an escalation that did not happen
-                // must be retried, not recorded as done.
-                let alert = format!(
-                    "{text}\n\nESCALATION FAILED: {e:#}\ncommand: {cmd}\nat: {t}\n\
-                     These deliveries are still unacknowledged and nobody has been told.\n"
-                );
-                let path = store.write_alert(overdue[0].id, &alert)?;
-                eprintln!("colloquy: ESCALATION FAILED via {cmd}: {e:#}");
-                eprintln!("colloquy: wrote {}", path.display());
-                exit = EXIT_ESCALATION_FAILED;
-            }
+            println!("escalated\t{}\tvia {cmd}", names.join(","));
+            exit = exit.max(EXIT_DEAF);
+        }
+        Err(e) => {
+            let alert = format!(
+                "{text}\n\nESCALATION FAILED: {e:#}\ncommand: {cmd}\nat: {t}\n\
+                 These deliveries are still unacknowledged and nobody has been told.\n"
+            );
+            let first = overdue[0].1[0].id;
+            let path = store.write_alert(first, &alert)?;
+            eprintln!("colloquy: ESCALATION FAILED via {cmd}: {e:#}");
+            eprintln!("colloquy: wrote {}", path.display());
+            exit = EXIT_ESCALATION_FAILED;
         }
     }
 
@@ -391,25 +461,45 @@ fn cmd_sweep(store: &Store, args: &Args) -> Result<i32> {
 /// alert whose only job is to be understood immediately cannot spend its words
 /// on a duration that reads as a bug. So: say the trouble first, and give the
 /// age only when it is long enough to be information.
-fn escalation_text(agent: &str, count: usize, oldest_secs: i64) -> String {
-    let what = if count == 1 {
-        format!("a Colloquy message")
+fn escalation_text(agents: &[&str], messages: usize, oldest_secs: i64) -> String {
+    let who = match agents {
+        [one] => format!("{one} is not acknowledging"),
+        _ => format!(
+            "{} agents are not acknowledging",
+            spoken_number(agents.len())
+        ),
+    };
+    let what = if messages == 1 {
+        "a Colloquy message".to_string()
     } else {
-        format!("{count} Colloquy messages")
+        "Colloquy messages".to_string()
+    };
+    let names = if agents.len() > 1 {
+        format!(" — {}", agents.join(", "))
+    } else {
+        String::new()
     };
     if oldest_secs < 120 {
-        format!("Andy. {agent} is not acknowledging {what}.")
+        format!("Andy. {who} {what}{names}.")
     } else if oldest_secs < 3600 {
-        format!(
-            "Andy. {agent} has not acknowledged {what} for {} minutes.",
-            oldest_secs / 60
-        )
+        format!("Andy. {who} {what} — for {} minutes{names}.", oldest_secs / 60)
     } else {
         let hours = oldest_secs / 3600;
         format!(
-            "Andy. {agent} has not acknowledged {what} for over {hours} hour{}.",
+            "Andy. {who} {what} — for over {hours} hour{}{names}.",
             if hours == 1 { "" } else { "s" }
         )
+    }
+}
+
+/// Small numbers read better spoken as words than as digits.
+fn spoken_number(n: usize) -> String {
+    match n {
+        2 => "Two".into(),
+        3 => "Three".into(),
+        4 => "Four".into(),
+        5 => "Five".into(),
+        _ => n.to_string(),
     }
 }
 
@@ -480,15 +570,25 @@ mod tests {
     fn a_spoken_alert_never_says_zero_seconds() {
         // Andy heard the first version say "in 0 seconds" and asked what it
         // meant, which is the correct reaction to an alert that sounds broken.
-        let t = escalation_text("DEAFTEST", 1, 0);
+        let t = escalation_text(&["DEAFTEST"], 1, 0);
         assert!(!t.contains('0'), "got: {t}");
         assert_eq!(t, "Andy. DEAFTEST is not acknowledging a Colloquy message.");
     }
 
     #[test]
     fn a_long_silence_says_how_long() {
-        assert!(escalation_text("A", 2, 600).contains("10 minutes"));
-        assert!(escalation_text("A", 1, 7200).contains("over 2 hours"));
-        assert!(escalation_text("A", 1, 3700).contains("over 1 hour."));
+        assert!(escalation_text(&["A"], 2, 600).contains("for 10 minutes"));
+        assert!(escalation_text(&["A"], 1, 7200).contains("for over 2 hours"));
+        assert!(escalation_text(&["A"], 1, 3700).contains("for over 1 hour"));
+    }
+
+    #[test]
+    fn several_quiet_agents_are_one_alert_that_names_them() {
+        // A shout reaches everyone, so several agents can go quiet on the same
+        // message. That is ONE thing to be told, not N.
+        let t = escalation_text(&["SHINOBI", "RSTAR", "MEGA65"], 3, 0);
+        assert!(t.starts_with("Andy. Three agents are not acknowledging"), "got: {t}");
+        assert!(t.contains("SHINOBI, RSTAR, MEGA65"), "got: {t}");
+        assert_eq!(t.matches("Andy").count(), 1, "one alert, not three");
     }
 }
