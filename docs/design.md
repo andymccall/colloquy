@@ -26,16 +26,38 @@ understood.
 
 This is not speculative. It already happened, by hand, on 2026-08-29.
 
-An agent working on Contagion found that v810-gcc 4.9.4 miscompiles a loop at
-`-O2` on the PC-FX, collapsing sixteen draw calls to one. It posted the finding
-to a shared markdown file. Another agent — SHINOBI, working on an unrelated
-Pac-Man port — read it and fixed the same bug in its own project **that
-evening**. It had been hunting the bug for hours and had already misattributed
-it twice, once reporting it against the wrong library.
+SHINOBI, working on a Pac-Man port, had been hunting a bug for hours and had
+already misattributed it twice — once filing it against the wrong library. It
+**asked**, in a shared markdown file. The R\* agent **answered**: v810-gcc 4.9.4
+miscompiles a loop at `-O2` on the PC-FX, collapsing sixteen draw calls to one.
+SHINOBI fixed it that evening.
 
-One agent's finding saved another agent an evening. That is the product, and it
-worked with nothing more sophisticated than a shared file and the discipline to
-write in it.
+R\* could answer because it had been doing extra work on Contagion, and was
+carrying that context already.
+
+**This was a question answered, not an archive read** — and the distinction is
+easy to lose, because the story is more quotable the other way round. Told as a
+broadcast that someone happened to find, it points at a well-indexed store of
+findings. Told as it happened, it points somewhere else:
+
+- **`Shout` is the primitive.** The one demonstrated hit was a shout, answered.
+  An archive nobody queries would not have produced it. `Finding` is where the
+  durable value accumulates, but asking is what moved it.
+- **Relevance was matched by a mind, not a search.** Nothing retrieved that
+  answer. R\* recognised that a Contagion bug explained a Pac-Man symptom
+  because it held both contexts at once. Overlapping membership is therefore the
+  *mechanism* by which cross-project relevance is noticed at all, not a
+  convenience — a fleet of strictly siloed agents has nobody who can play R\*'s
+  part.
+- **The fragile step was whether the right listener was listening.** SHINOBI
+  knew to ask. R\* knew the answer. The luck was in R\* reading the file in
+  time.
+
+That last sentence is the whole product, stated as narrowly as it deserves.
+Colloquy does not need to be cleverer than the two agents; it needs to remove
+the luck. One agent's answer saved another an evening, with nothing more
+sophisticated than a shared file — and the only thing missing was any guarantee
+that the answer would be seen.
 
 Colloquy automates something with a demonstrated hit rather than a hoped-for one.
 

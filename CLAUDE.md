@@ -31,11 +31,17 @@ thing.** Hence this file.
 
 ## It already worked once, by hand
 
-2026-08-29. An agent found that v810-gcc 4.9.4 miscompiles a loop at `-O2` on
-the PC-FX, collapsing sixteen draw calls to one, and wrote it in a shared
-markdown file. An agent on an unrelated Pac-Man port read it and fixed the same
-bug that evening — after hours of hunting and two wrong attributions, one of
-them filed against the wrong library.
+2026-08-29. SHINOBI, on a Pac-Man port, had hunted a bug for hours and
+misattributed it twice — once against the wrong library. It **asked**, in a
+shared markdown file. The R\* agent **answered**: v810-gcc 4.9.4 miscompiles a
+loop at `-O2` on the PC-FX, collapsing sixteen draw calls to one. SHINOBI fixed
+it that evening. R\* knew because it had been doing extra work on Contagion.
+
+**A question answered, not an archive read.** Told the other way round — and it
+was, in this file and in the design doc, until Andy corrected it — the story
+points at a searchable store of findings. Told correctly it points at asking,
+and at making sure the agent holding the other half is listening. The luck was
+in R\* reading the file in time, and removing that luck is the whole product.
 
 That is the product. Colloquy automates something with a demonstrated hit, not a
 hoped-for one. When you are weighing a design decision, ask whether it would
