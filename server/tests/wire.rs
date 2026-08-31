@@ -304,14 +304,99 @@ fn a_malformed_request_is_answered_rather_than_dropped() {
 }
 
 #[test]
-fn an_unimplemented_operation_says_so_instead_of_succeeding() {
+fn learn_then_search_over_the_wire() {
+    let s = start();
+    let (rstar, shinobi) = setup(&s);
+
+    let mut a = Client::connect(s.port);
+    a.hello("RSTAR", &rstar);
+    let learned = a.send(serde_json::json!({
+        "op":"learn","name":"pcfx-o2","description":"v810 collapses loops at -O2",
+        "kind":"finding","body":"sixteen draw calls became one"
+    }));
+    assert_eq!(learned["re"], "learned", "got: {learned}");
+
+    // Another agent finds it. This is the exchange the project exists for: one
+    // agent's finding reaching another that never saw it happen.
+    let mut b = Client::connect(s.port);
+    b.hello("SHINOBI", &shinobi);
+    let found = b.send(serde_json::json!({"op":"search","query":"v810","limit":10}));
+    assert_eq!(found["re"], "found", "got: {found}");
+    let k = found["knowledge"].as_array().unwrap();
+    assert_eq!(k.len(), 1, "got: {found}");
+    assert_eq!(k[0]["name"], "pcfx-o2");
+    assert_eq!(k[0]["author"], "RSTAR");
+}
+
+#[test]
+fn a_correction_replaces_what_it_corrects() {
+    // Corrections are the most valuable and least captured kind. A store that
+    // kept both versions would hand the reader two contradictory claims and make
+    // them do the reconciling.
+    let s = start();
+    let (rstar, shinobi) = setup(&s);
+
+    let mut a = Client::connect(s.port);
+    a.hello("RSTAR", &rstar);
+    a.send(serde_json::json!({
+        "op":"learn","name":"pce-lto","description":"the pin",
+        "kind":"finding","body":"-O0 is the pin, measured on the PCE floor"
+    }));
+
+    let mut b = Client::connect(s.port);
+    b.hello("SHINOBI", &shinobi);
+    b.send(serde_json::json!({
+        "op":"learn","name":"pce-lto","description":"the pin, corrected",
+        "kind":"correction","body":"-fno-lto alone is the pin; -O0 was never it"
+    }));
+
+    let found = a.send(serde_json::json!({"op":"search","query":"pin","limit":10}));
+    let k = found["knowledge"].as_array().unwrap();
+    assert_eq!(k.len(), 1, "one corrected claim, not two: {found}");
+    assert_eq!(k[0]["kind"], "correction");
+    assert_eq!(k[0]["author"], "SHINOBI", "who says this now");
+
+    // And the superseded text is gone from the index, not merely outranked.
+    // "measured" appears only in the body that was replaced — searching for
+    // "-O0" would not do, since the correction mentions it too.
+    let stale = a.send(serde_json::json!({"op":"search","query":"measured","limit":10}));
+    assert!(
+        stale["knowledge"].as_array().unwrap().is_empty(),
+        "the old body must not still be findable: {stale}"
+    );
+}
+
+#[test]
+fn knowledge_arrives_in_the_next_agent_s_bootstrap() {
+    // The profile IS the bootstrap: an agent joining is handed the curated
+    // knowledge, not a message tail. This is the whole "joined at the handshake"
+    // argument, tested.
+    let s = start();
+    let (rstar, shinobi) = setup(&s);
+    let mut a = Client::connect(s.port);
+    a.hello("RSTAR", &rstar);
+    a.send(serde_json::json!({
+        "op":"learn","name":"zp-determinism","description":"MEGA65 lottery",
+        "kind":"finding","body":"MOSZeroPageAlloc pointer order"
+    }));
+
+    let mut b = Client::connect(s.port);
+    let welcome = b.hello("SHINOBI", &shinobi);
+    let k = welcome["profile"]["knowledge"].as_array().unwrap();
+    assert_eq!(k.len(), 1, "handed at the handshake: {welcome}");
+    assert_eq!(k[0]["name"], "zp-determinism");
+}
+
+#[test]
+fn a_search_query_full_of_punctuation_is_answered_not_an_error() {
     let s = start();
     let (rstar, _) = setup(&s);
     let mut c = Client::connect(s.port);
     c.hello("RSTAR", &rstar);
-    let r = c.send(serde_json::json!({"op":"search","query":"v810","limit":5}));
-    assert_eq!(r["re"], "error", "an unimplemented op must not return success: {r}");
-    assert!(r["message"].as_str().unwrap().contains("not implemented"));
+    for q in ["\"unbalanced", "AND OR", "*", "a\"b(c)"] {
+        let r = c.send(serde_json::json!({"op":"search","query":q,"limit":5}));
+        assert_eq!(r["re"], "found", "query {q:?} should answer, not error: {r}");
+    }
 }
 
 #[test]

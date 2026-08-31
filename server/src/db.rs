@@ -66,15 +66,52 @@ CREATE TABLE IF NOT EXISTS message (
 );
 CREATE INDEX IF NOT EXISTS message_by_id ON message(id);
 
+-- `name` is UNIQUE, and that is the whole retention policy for knowledge.
+--
+-- Claude Code's memory/ directory is one file per fact, updated in place when
+-- the fact changes, and it works because of that: a claim that has been revised
+-- reads as one corrected thing rather than as two contradictory ones with a
+-- date to compare. An append-only knowledge table would accumulate every
+-- superseded version and make the reader do the reconciling, which is exactly
+-- the archaeology the design doc rejects.
+--
+-- So Learn upserts. Messages are the append-only stream; knowledge is the
+-- curated document.
 CREATE TABLE IF NOT EXISTS knowledge (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL,
+    name        TEXT NOT NULL UNIQUE,
     description TEXT NOT NULL,
     kind        TEXT NOT NULL,
     body        TEXT NOT NULL,
     author      TEXT NOT NULL,
     at          INTEGER NOT NULL
 );
+
+-- Keyword search, which the design says must be earned before anything cleverer
+-- is reached for. FTS5 is compiled into the bundled SQLite here -- checked, not
+-- assumed. `content=` makes this an index over the real table rather than a
+-- second copy of the text that can drift from it.
+CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+    name, description, body,
+    content='knowledge', content_rowid='id'
+);
+
+-- The triggers are what stop the index and the table disagreeing. Without them
+-- a search returns yesterday's text with today's confidence.
+CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge BEGIN
+    INSERT INTO knowledge_fts(rowid, name, description, body)
+    VALUES (new.id, new.name, new.description, new.body);
+END;
+CREATE TRIGGER IF NOT EXISTS knowledge_ad AFTER DELETE ON knowledge BEGIN
+    INSERT INTO knowledge_fts(knowledge_fts, rowid, name, description, body)
+    VALUES ('delete', old.id, old.name, old.description, old.body);
+END;
+CREATE TRIGGER IF NOT EXISTS knowledge_au AFTER UPDATE ON knowledge BEGIN
+    INSERT INTO knowledge_fts(knowledge_fts, rowid, name, description, body)
+    VALUES ('delete', old.id, old.name, old.description, old.body);
+    INSERT INTO knowledge_fts(rowid, name, description, body)
+    VALUES (new.id, new.name, new.description, new.body);
+END;
 "#;
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -387,6 +424,74 @@ pub fn high_water(conn: &Connection) -> Result<i64> {
         .unwrap_or(0))
 }
 
+/// Record something learned, at the moment it was learned.
+///
+/// Upserts on `name`. Recording a fact twice under one name is a revision, not
+/// a second fact — see the schema comment. The author and time become those of
+/// the revision, because the question a reader asks is "who says this now".
+pub fn learn(
+    conn: &Connection,
+    author: &str,
+    name: &str,
+    description: &str,
+    kind: Kind,
+    body: &str,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO knowledge (name, description, kind, body, author, at)
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(name) DO UPDATE SET
+              description = excluded.description,
+              kind        = excluded.kind,
+              body        = excluded.body,
+              author      = excluded.author,
+              at          = excluded.at",
+        params![name, description, kind_to_str(kind), body, author, now()],
+    )
+    .with_context(|| format!("recording {name:?}"))?;
+    Ok(conn.query_row("SELECT id FROM knowledge WHERE name = ?1", params![name], |r| r.get(0))?)
+}
+
+/// Keyword search over the curated knowledge.
+///
+/// The query is user text going into an FTS5 `MATCH`, where bare punctuation is
+/// syntax rather than words — an unbalanced quote is a hard error, not a search
+/// for a quote. So it is reduced to bare terms and re-quoted. That loses FTS5's
+/// operators, which is the right trade for a query an agent typed from a symptom
+/// rather than composed.
+pub fn search(conn: &Connection, query: &str, limit: u32) -> Result<Vec<Knowledge>> {
+    let terms: Vec<String> = query
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{t}\""))
+        .collect();
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let match_expr = terms.join(" OR ");
+
+    let mut stmt = conn.prepare(
+        "SELECT k.id, k.name, k.description, k.kind, k.body, k.author, k.at
+           FROM knowledge_fts f
+           JOIN knowledge k ON k.id = f.rowid
+          WHERE knowledge_fts MATCH ?1
+          ORDER BY bm25(knowledge_fts)
+          LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![match_expr, limit as i64], |r| {
+        Ok(Knowledge {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            description: r.get(2)?,
+            kind: kind_from_str(&r.get::<_, String>(3)?),
+            body: r.get(4)?,
+            author: AgentId(r.get::<_, String>(5)?),
+            at: r.get(6)?,
+        })
+    })?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,6 +616,60 @@ mod tests {
         assert!(p.charter.starts_with("the API"));
         assert_eq!(p.channels, vec![ChannelId("toolchains".into())]);
         assert!(p.knowledge.is_empty(), "knowledge is curated, not the recent traffic");
+    }
+
+    #[test]
+    fn learning_the_same_name_twice_is_a_revision_not_a_duplicate() {
+        // The property that makes memory/ readable: a corrected claim reads as
+        // one corrected thing, not two contradictory ones with dates to compare.
+        let c = mem();
+        register(&c, "RSTAR", "").unwrap();
+        register(&c, "SHINOBI", "").unwrap();
+        let a = learn(&c, "RSTAR", "pce-lto", "d1", Kind::Finding, "-O0 is the pin").unwrap();
+        let b = learn(&c, "SHINOBI", "pce-lto", "d2", Kind::Correction, "-fno-lto alone is the pin").unwrap();
+        assert_eq!(a, b, "same name, same row");
+
+        let all = knowledge_all(&c).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].body, "-fno-lto alone is the pin");
+        assert_eq!(all[0].author.0, "SHINOBI", "who says this NOW");
+        assert_eq!(all[0].kind, Kind::Correction);
+    }
+
+    #[test]
+    fn search_finds_by_any_field_and_a_revision_replaces_the_old_text() {
+        let c = mem();
+        register(&c, "RSTAR", "").unwrap();
+        learn(&c, "RSTAR", "pcfx-o2", "v810 collapses loops", Kind::Finding,
+              "sixteen draw calls became one at -O2").unwrap();
+        learn(&c, "RSTAR", "zp-determinism", "MEGA65 lottery", Kind::Finding,
+              "MOSZeroPageAlloc pointer order").unwrap();
+
+        assert_eq!(search(&c, "v810", 10).unwrap().len(), 1, "by description");
+        assert_eq!(search(&c, "MOSZeroPageAlloc", 10).unwrap().len(), 1, "by body");
+        assert_eq!(search(&c, "pcfx-o2", 10).unwrap().len(), 1, "by name");
+        assert_eq!(search(&c, "nothing-matches-this", 10).unwrap().len(), 0);
+
+        // The index must follow a revision, or search returns yesterday's text
+        // with today's confidence.
+        learn(&c, "RSTAR", "pcfx-o2", "retracted", Kind::Correction,
+              "it was never the optimiser, it was the histogram").unwrap();
+        assert_eq!(search(&c, "sixteen", 10).unwrap().len(), 0, "the old body is gone from the index");
+        assert_eq!(search(&c, "histogram", 10).unwrap().len(), 1, "the new body is in it");
+    }
+
+    #[test]
+    fn a_query_full_of_fts_syntax_does_not_blow_up() {
+        // A query an agent typed from a symptom, not one it composed. Bare
+        // punctuation is FTS5 syntax, and an unbalanced quote is a hard error
+        // rather than a search for a quote.
+        let c = mem();
+        register(&c, "RSTAR", "").unwrap();
+        learn(&c, "RSTAR", "n", "d", Kind::Finding, "the linker dropped a symbol").unwrap();
+        for q in ["\"unbalanced", "AND OR NOT", "*", "", "()", "linker AND", "a\"b(c)"] {
+            assert!(search(&c, q, 10).is_ok(), "query {q:?} should not error");
+        }
+        assert_eq!(search(&c, "  linker!!  ", 10).unwrap().len(), 1, "punctuation is stripped, terms survive");
     }
 
     #[test]

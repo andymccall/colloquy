@@ -25,7 +25,6 @@ mod db;
 
 use anyhow::{Context, Result, bail};
 use colloquy_proto::{Request, Response};
-use db::now;
 use rusqlite::Connection;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -301,12 +300,23 @@ fn handle_inner(
             Ok(Response::Messages { messages: msgs, since: high })
         }
 
-        Request::Learn { .. } | Request::Search { .. } => {
-            // Deliberately not silently accepted. An unimplemented operation
-            // that returns success is the failure this project keeps finding in
-            // other people's tools.
-            let _ = now();
-            Ok(Response::Error { message: "not implemented yet".into() })
+        Request::Learn { name, description, kind, body } => {
+            let me = authenticated(who)?;
+            // Upserts on name: recording a fact twice under one name is a
+            // revision, not a second fact. See the schema comment.
+            let id = db::learn(conn, &me, &name, &description, kind, &body)?;
+            Ok(Response::Learned { id })
+        }
+
+        Request::Search { query, limit } => {
+            // Authenticated, though it reads nothing private today: knowledge is
+            // shared by design. Requiring Hello anyway means the day something
+            // IS scoped, the gate is already in the right place rather than
+            // needing to be added to a call site that has learned to work
+            // without one.
+            let _me = authenticated(who)?;
+            let knowledge = db::search(conn, &query, limit.clamp(1, 100))?;
+            Ok(Response::Found { knowledge })
         }
     }
 }
